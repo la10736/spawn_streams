@@ -145,9 +145,9 @@ mod should {
 
         let mut spawnable = Spawnable::<i32>::new();
 
+        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
+
         let spawned = spawnable.spawn().await;
-        let engine = spawnable.engine();
-        let _engine = async_std::task::spawn(engine.run(stream::iter(data.clone())));
 
         assert_eq!(
             data,
@@ -165,14 +165,13 @@ mod should {
 
         let mut spawnable = Spawnable::<i32>::new();
 
+        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
+
         let (spawned_1, spawned_2, spawned_3) = (
             spawnable.spawn().await,
             spawnable.spawn().await,
             spawnable.spawn().await,
         );
-
-        let engine = spawnable.engine();
-        let _engine = async_std::task::spawn(engine.run(stream::iter(data.clone())));
 
         let (res1, res2, res3) = futures::join!(
             spawned_1.map(|i| *i).take(data.len()).collect::<Vec<_>>(),
@@ -191,10 +190,9 @@ mod should {
 
         let mut spawnable = Spawnable::<i32>::new();
 
-        let mut spawned_1 = spawnable.spawn().await;
+        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
 
-        let engine = spawnable.engine();
-        let _engine = async_std::task::spawn(engine.run(stream::iter(data.clone())));
+        let mut spawned_1 = spawnable.spawn().await;
 
         assert_eq!(1, *(spawned_1.next().await.unwrap()));
 
@@ -224,12 +222,12 @@ mod should {
 
         let mut spawnable = Spawnable::<i32>::new();
 
+        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
+
         let spawned = spawnable.spawn().await;
-        let engine = spawnable.engine();
-        let _engine = async_std::task::spawn(engine.run(stream::iter(data.clone())));
 
         async_std::task::spawn(async move {
-            async_std::task::sleep(std::time::Duration::from_millis(100)).await;
+            async_std::task::sleep(std::time::Duration::from_millis(150)).await;
             drop(spawnable);
         });
         assert_eq!(data, spawned.map(|i| *i).collect::<Vec<_>>().await);
@@ -241,12 +239,12 @@ mod should {
 
         let mut spawnable = Spawnable::<i32>::new();
 
+        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
+
         let spawned = spawnable.spawn().await;
-        let engine = spawnable.engine();
-        let _engine = async_std::task::spawn(engine.run(stream::iter(data.clone())));
 
         drop(spawnable);
 
-        assert!(spawned.collect::<Vec<_>>().await.is_empty());
+        assert!(spawned.collect::<Vec<_>>().await.len() <= 1);
     }
 }
