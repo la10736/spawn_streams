@@ -12,7 +12,7 @@ use futures::{
     SinkExt, Stream, StreamExt,
 };
 
-struct Spawnable<T> {
+pub struct Spawnable<T> {
     channels: Senders<T>,
 }
 
@@ -23,11 +23,11 @@ impl<T: 'static + Send + Sync + std::fmt::Debug> Spawnable<T> {
         }
     }
 
-    fn engine(&self) -> Engine<T> {
+    pub fn engine(&self) -> Engine<T> {
         Engine::<T>::from(self.channels.clone())
     }
 
-    async fn spawn(&mut self) -> impl Stream<Item = Arc<T>> {
+    pub async fn spawn(&self) -> impl Stream<Item = Arc<T>> {
         self.channels.create().await
     }
 }
@@ -91,7 +91,7 @@ impl<T> Senders<T> {
         Arc::<Mutex<Txs<T>>>::downgrade(&self.0)
     }
 }
-struct Engine<T>(Pin<Box<dyn futures::Sink<T, Error = Never> + Send>>);
+pub struct Engine<T>(Pin<Box<dyn futures::Sink<T, Error = Never> + Send>>);
 
 impl<T: 'static + Send + Sync + std::fmt::Debug> Engine<T> {
     async fn process(channels: Weak<Mutex<Txs<T>>>, t: T) -> Result<(), Never> {
@@ -116,7 +116,7 @@ impl<T: 'static + Send + Sync + std::fmt::Debug> Engine<T> {
         Ok(())
     }
 
-    async fn run(mut self, feeder: impl Stream<Item = T> + Unpin) {
+    pub async fn run(mut self, feeder: impl Stream<Item = T> + Unpin) {
         let mut stream = feeder.map(Ok);
         self.0.send_all(&mut stream).await.unwrap();
     }
@@ -143,7 +143,7 @@ mod should {
     async fn return_a_stream_of_references_of_the_original_one() {
         let data: Vec<i32> = vec![1, 2, 3];
 
-        let mut spawnable = Spawnable::<i32>::new();
+        let spawnable = Spawnable::<i32>::new();
 
         let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
 
@@ -163,7 +163,7 @@ mod should {
     async fn return_some_streams_of_references_of_the_original_one() {
         let data: Vec<i32> = vec![1, 2, 3];
 
-        let mut spawnable = Spawnable::<i32>::new();
+        let spawnable = Spawnable::<i32>::new();
 
         let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
 
@@ -188,7 +188,7 @@ mod should {
     async fn add_more_receivers() {
         let data: Vec<i32> = vec![1, 2, 3];
 
-        let mut spawnable = Spawnable::<i32>::new();
+        let spawnable = Spawnable::<i32>::new();
 
         let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
 
@@ -220,7 +220,7 @@ mod should {
     async fn close_receiver_stream_if_spawnable_owner_die() {
         let data: Vec<i32> = vec![1, 2, 3];
 
-        let mut spawnable = Spawnable::<i32>::new();
+        let spawnable = Spawnable::<i32>::new();
 
         let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
 
@@ -237,7 +237,7 @@ mod should {
     async fn drop_original_stream_should_interrupt_receivers() {
         let data: Vec<i32> = vec![1, 2, 3];
 
-        let mut spawnable = Spawnable::<i32>::new();
+        let spawnable = Spawnable::<i32>::new();
 
         let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
 
@@ -252,7 +252,7 @@ mod should {
     async fn should_use_backpressure_of_one_element() {
         let data: Vec<i32> = (1..10000).collect();
 
-        let mut spawnable = Spawnable::<i32>::new();
+        let spawnable = Spawnable::<i32>::new();
 
         let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
 
