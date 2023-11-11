@@ -249,7 +249,7 @@ mod should {
     }
 
     #[async_std::test]
-    async fn should_use_backpressure_of_at_most_one_element() {
+    async fn should_use_backpressure_of_one_element() {
         let data: Vec<i32> = (1..10000).collect();
 
         let mut spawnable = Spawnable::<i32>::new();
@@ -261,6 +261,6 @@ mod should {
         async_std::task::sleep(std::time::Duration::from_millis(150)).await;
         drop(spawnable);
 
-        assert!(spawned.collect::<Vec<_>>().await.len() <= 1);
+        assert_eq!(spawned.map(|i| *i).collect::<Vec<_>>().await, vec![1]);
     }
 }
