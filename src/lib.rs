@@ -247,4 +247,20 @@ mod should {
 
         assert!(spawned.collect::<Vec<_>>().await.len() <= 1);
     }
+
+    #[async_std::test]
+    async fn should_use_backpressure_of_at_most_one_element() {
+        let data: Vec<i32> = (1..10000).collect();
+
+        let mut spawnable = Spawnable::<i32>::new();
+
+        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
+
+        let spawned = spawnable.spawn().await;
+
+        async_std::task::sleep(std::time::Duration::from_millis(150)).await;
+        drop(spawnable);
+
+        assert!(spawned.collect::<Vec<_>>().await.len() <= 1);
+    }
 }
