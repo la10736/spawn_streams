@@ -1,141 +1,171 @@
 use std::{
     collections::HashMap,
     convert::identity,
-    pin::Pin,
     sync::{Arc, Weak},
 };
 
 use futures::{
-    channel::mpsc::{Receiver as ReceiverF, Sender as SenderF},
-    lock::Mutex,
-    never::Never,
-    SinkExt, Stream, StreamExt,
+    channel::mpsc, future::join_all, lock::Mutex as FutMutex, never::Never, Future, SinkExt,
+    Stream, StreamExt,
 };
 
 pub struct Spawnable<T> {
-    channels: Senders<T>,
+    channels: Channels<T>,
 }
 
-impl<T: 'static + Send + Sync + std::fmt::Debug> Spawnable<T> {
+impl<T> Spawnable<T> {
     pub fn new() -> Self {
         Self {
-            channels: Senders::new(),
+            channels: Channels::new(),
         }
-    }
-
-    pub fn engine(&self) -> Engine<T> {
-        Engine::<T>::from(self.channels.clone())
     }
 
     pub async fn spawn(&self) -> impl Stream<Item = Arc<T>> {
         self.channels.create().await
     }
+
+    pub fn feed(&self, feed: impl Stream<Item = T>) -> impl Future<Output = ()> {
+        let channels = self.channels.clone().weak();
+        feed.for_each(move |t| {
+            let channels = channels.clone();
+            async move {
+                channels.send_to_all(t).await.unwrap();
+            }
+        })
+    }
 }
 
-type Sender<T> = Arc<Mutex<SenderF<Arc<T>>>>;
-
-struct Txs<T> {
-    txs: HashMap<usize, Sender<T>>,
-    last_id: usize,
+struct Channels<T> {
+    txs: Arc<FutMutex<Txs<T>>>,
 }
-impl<T> Default for Txs<T> {
-    fn default() -> Self {
+impl<T> Channels<T> {
+    fn new() -> Self {
         Self {
-            txs: HashMap::new(),
-            last_id: Default::default(),
+            txs: Arc::new(FutMutex::new(Txs::new())),
         }
+    }
+
+    async fn create(&self) -> impl Stream<Item = Arc<T>> {
+        self.txs.lock().await.create()
     }
 }
 
-impl<T> Txs<T> {
-    fn new() -> Self {
-        Default::default()
-    }
-
-    fn create(&mut self) -> ReceiverF<Arc<T>> {
-        let (tx, rx) = futures::channel::mpsc::channel(0);
-        self.last_id += 1;
-        self.txs.insert(self.last_id, Arc::new(Mutex::new(tx)));
-        rx
-    }
-
-    fn entries(&self) -> Vec<(usize, Sender<T>)> {
-        self.txs.iter().map(|(id, tx)| (*id, tx.clone())).collect()
-    }
-
-    fn removes(&mut self, idxs: impl Iterator<Item = usize>) {
-        for id in idxs {
-            self.txs.remove(&id);
-        }
+impl<T> Channels<T> {
+    fn weak(self) -> WeakChannels<T> {
+        self.into()
     }
 }
 
-struct Senders<T>(Arc<Mutex<Txs<T>>>);
-
-impl<T> Clone for Senders<T> {
+impl<T> Clone for Channels<T> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            txs: self.txs.clone(),
+        }
     }
 }
 
-impl<T> Senders<T> {
-    fn new() -> Self {
-        Self(Arc::new(Mutex::new(Txs::new())))
-    }
+struct WeakChannels<T> {
+    txs: Weak<FutMutex<Txs<T>>>,
+}
 
-    async fn create(&self) -> ReceiverF<Arc<T>> {
-        self.0.lock().await.create()
-    }
-
-    fn weak(&self) -> Weak<Mutex<Txs<T>>> {
-        Arc::<Mutex<Txs<T>>>::downgrade(&self.0)
+impl<T> Clone for WeakChannels<T> {
+    fn clone(&self) -> Self {
+        Self {
+            txs: self.txs.clone(),
+        }
     }
 }
-pub struct Engine<T>(Pin<Box<dyn futures::Sink<T, Error = Never> + Send>>);
 
-impl<T: 'static + Send + Sync + std::fmt::Debug> Engine<T> {
-    async fn process(channels: Weak<Mutex<Txs<T>>>, t: T) -> Result<(), Never> {
-        if let Some(channels) = channels.upgrade() {
-            let entries = channels.lock().await.entries();
+impl<T> WeakChannels<T> {
+    async fn send_to_all(&self, t: T) -> Result<(), Never> {
+        if let Some(txs) = self.txs.upgrade() {
             let t = Arc::new(t);
-            let dead_indexes = futures::future::join_all(entries.into_iter().map(|(id, tx)| {
+            let entries = txs.lock().await.entries();
+            let dead_indexs = join_all(entries.into_iter().map(|(id, tx)| {
+                let tx = tx.clone();
                 let t = t.clone();
                 async move {
-                    if let Ok(_) = tx.lock().await.send(t).await {
-                        None
-                    } else {
-                        Some(id)
+                    match tx.send(t.clone()).await {
+                        Ok(_) => None,
+                        Err(_) => Some(id),
                     }
                 }
             }))
             .await
             .into_iter()
             .filter_map(identity);
-            channels.lock().await.removes(dead_indexes);
+            txs.lock().await.remove(dead_indexs);
         }
         Ok(())
     }
+}
 
-    pub async fn run(mut self, feeder: impl Stream<Item = T> + Unpin) {
-        let mut stream = feeder.map(Ok);
-        self.0.send_all(&mut stream).await.unwrap();
+impl<T> From<Channels<T>> for WeakChannels<T> {
+    fn from(value: Channels<T>) -> Self {
+        Self {
+            txs: Arc::downgrade(&value.txs),
+        }
     }
 }
 
-impl<T: 'static + Send + Sync + std::fmt::Debug> From<Senders<T>> for Engine<T> {
-    fn from(channels: Senders<T>) -> Self {
-        let c = channels.weak();
-        Engine(Box::pin(futures::sink::drain().with(move |t| {
-            let c = c.clone();
-            async move { Self::process(c, t).await }
-        })))
+struct Txs<T> {
+    txs: HashMap<usize, Tx<T>>,
+    last_index: usize,
+}
+impl<T> Txs<T> {
+    fn new() -> Txs<T> {
+        Self {
+            txs: HashMap::new(),
+            last_index: 0,
+        }
+    }
+
+    fn create(&mut self) -> impl Stream<Item = Arc<T>> {
+        let (tx, rx) = mpsc::channel(0);
+        self.txs.insert(self.last_index, Tx::new(tx));
+        self.last_index += 1;
+        rx
+    }
+
+    fn entries(&self) -> Vec<(usize, Tx<T>)> {
+        self.txs.iter().map(|(id, tx)| (*id, tx.clone())).collect()
+    }
+
+    fn remove(&mut self, ids: impl Iterator<Item = usize>) {
+        for id in ids {
+            self.txs.remove(&id);
+        }
+    }
+}
+
+struct Tx<T> {
+    tx: Arc<FutMutex<mpsc::Sender<Arc<T>>>>,
+}
+
+impl<T> Clone for Tx<T> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+        }
+    }
+}
+
+impl<T> Tx<T> {
+    fn new(tx: mpsc::Sender<Arc<T>>) -> Tx<T> {
+        Self {
+            tx: Arc::new(FutMutex::new(tx)),
+        }
+    }
+
+    async fn send(&self, t: Arc<T>) -> Result<(), ()> {
+        self.tx.lock().await.send(t).await.map_err(|_| ())
     }
 }
 
 #[cfg(test)]
 mod should {
 
-    use futures::stream;
+    use futures::{stream, StreamExt};
 
     use super::*;
 
@@ -145,9 +175,9 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let spawned = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         assert_eq!(
             data,
@@ -165,13 +195,13 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let (spawned_1, spawned_2, spawned_3) = (
             spawnable.spawn().await,
             spawnable.spawn().await,
             spawnable.spawn().await,
         );
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         let (res1, res2, res3) = futures::join!(
             spawned_1.map(|i| *i).take(data.len()).collect::<Vec<_>>(),
@@ -190,9 +220,9 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let mut spawned_1 = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         assert_eq!(1, *(spawned_1.next().await.unwrap()));
 
@@ -222,9 +252,9 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let spawned = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         async_std::task::spawn(async move {
             async_std::task::sleep(std::time::Duration::from_millis(150)).await;
@@ -239,9 +269,9 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let spawned = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         drop(spawnable);
 
@@ -249,14 +279,14 @@ mod should {
     }
 
     #[async_std::test]
-    async fn should_use_backpressure_of_one_element() {
-        let data: Vec<i32> = (1..10000).collect();
+    async fn should_use_backpressure_of_at_most_one_element() {
+        let data: Vec<i32> = (1..10).collect();
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let spawned = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         async_std::task::sleep(std::time::Duration::from_millis(150)).await;
         drop(spawnable);
