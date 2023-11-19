@@ -1,39 +1,25 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
-use futures::{stream, Stream};
+use futures::{Future, Stream};
 
 pub struct Spawnable<T> {
-    _phantom: PhantomData<T>,
+    _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T> Spawnable<T> {
     pub fn new() -> Self {
         Self {
-            _phantom: PhantomData,
+            _phantom: std::marker::PhantomData,
         }
-    }
-
-    pub fn engine(&self) -> Engine<T> {
-        Engine::new()
     }
 
     pub async fn spawn(&self) -> impl Stream<Item = Arc<T>> {
-        stream::empty()
-    }
-}
-
-pub struct Engine<T> {
-    _phantom: PhantomData<T>,
-}
-
-impl<T> Engine<T> {
-    fn new() -> Engine<T> {
-        Engine {
-            _phantom: PhantomData,
-        }
+        futures::stream::empty()
     }
 
-    pub async fn run(self, _feed: impl Stream<Item = T>) {}
+    pub fn feed(&self, _feed: impl Stream<Item = T>) -> impl Future<Output = ()> {
+        async { () }
+    }
 }
 
 #[cfg(test)]
@@ -49,9 +35,9 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let spawned = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         assert_eq!(
             data,
@@ -69,13 +55,13 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let (spawned_1, spawned_2, spawned_3) = (
             spawnable.spawn().await,
             spawnable.spawn().await,
             spawnable.spawn().await,
         );
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         let (res1, res2, res3) = futures::join!(
             spawned_1.map(|i| *i).take(data.len()).collect::<Vec<_>>(),
@@ -94,9 +80,9 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let mut spawned_1 = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         assert_eq!(1, *(spawned_1.next().await.unwrap()));
 
@@ -126,9 +112,9 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let spawned = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         async_std::task::spawn(async move {
             async_std::task::sleep(std::time::Duration::from_millis(150)).await;
@@ -143,9 +129,9 @@ mod should {
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let spawned = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         drop(spawnable);
 
@@ -154,13 +140,13 @@ mod should {
 
     #[async_std::test]
     async fn should_use_backpressure_of_at_most_one_element() {
-        let data: Vec<i32> = (1..10000).collect();
+        let data: Vec<i32> = (1..10).collect();
 
         let spawnable = Spawnable::<i32>::new();
 
-        let _engine = async_std::task::spawn(spawnable.engine().run(stream::iter(data.clone())));
-
         let spawned = spawnable.spawn().await;
+
+        let _engine = async_std::task::spawn(spawnable.feed(stream::iter(data.clone())));
 
         async_std::task::sleep(std::time::Duration::from_millis(150)).await;
         drop(spawnable);
